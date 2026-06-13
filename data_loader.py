@@ -99,7 +99,7 @@ def load_typhoon_animation_gif(typhoon_id: int) -> str:
 # ─── Typhoon metadata ─────────────────────────────────────────────────────────
 def load_typhoon_info() -> pd.DataFrame:
     """Load typhoon catalog (data.csv)."""
-    df = pd.read_csv(DATA_DIR / "data.csv")
+    df = pd.read_csv(DATA_DIR / "data.csv", encoding='utf-8')
     df = df.rename(columns={
         'typhoon_name': 'id',
         '年分': 'year',
