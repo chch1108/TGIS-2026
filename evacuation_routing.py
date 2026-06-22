@@ -8,6 +8,8 @@ import numpy as np
 import pandas as pd
 import heapq
 import math
+import urllib.request
+import json
 from data_loader import (
     load_typhoon_max, load_shelters,
     LON_MIN, LON_MAX, LAT_MIN, LAT_MAX,
@@ -142,12 +144,38 @@ def rl_penalized_dijkstra(cost_grid: np.ndarray,
     return dijkstra(rl_cost, start, goal)
 
 
+def query_osrm_route(coords: list) -> tuple:
+    """
+    Query street-aligned route from OSRM public API.
+    coords: list of (lon, lat) tuples
+    Returns (list of (lon, lat) tuples, distance_km) or (None, None) on failure.
+    """
+    coord_str = ";".join(f"{lon},{lat}" for lon, lat in coords)
+    url = f"http://router.project-osrm.org/route/v1/driving/{coord_str}?overview=full&geometries=geojson"
+    try:
+        req = urllib.request.Request(
+            url, 
+            headers={'User-Agent': 'TGIS-Yunlin-Disaster-Support/1.0'}
+        )
+        with urllib.request.urlopen(req, timeout=8) as response:
+            data = json.loads(response.read().decode())
+            if data.get("code") == "Ok":
+                route = data["routes"][0]
+                geometry = route["geometry"]
+                distance_km = route["distance"] / 1000.0
+                return [tuple(c) for c in geometry["coordinates"]], distance_km
+    except Exception:
+        pass
+    return None, None
+
+
 # ─── Route Comparison API ─────────────────────────────────────────────────────
 def compare_routes(typhoon_id: int,
                    origin_lat: float, origin_lon: float,
                    dest_lat: float, dest_lon: float,
                    flood_penalty: float = 50.0,
-                   block_threshold: float = 100.0) -> dict:
+                   block_threshold: float = 100.0,
+                   use_osrm: bool = True) -> dict:
     """
     Compare Dijkstra (shortest path) vs RL-informed (flood-avoiding) route.
     Returns dict with both paths and comparison metrics.
@@ -163,37 +191,80 @@ def compare_routes(typhoon_id: int,
     start = (max(0, min(w-1, start[0])), max(0, min(h-1, start[1])))
     goal  = (max(0, min(w-1, goal[0])),  max(0, min(h-1, goal[1])))
 
-    # Dijkstra path (ignores flood)
+    # Coarse Dijkstra path (ignores flood)
     dijkstra_cost_grid = np.ones_like(cost_grid)
     dijkstra_cost_grid[cost_grid == np.inf] = np.inf
     dijk_path, dijk_cost = dijkstra(dijkstra_cost_grid, start, goal)
 
-    # RL-penalized path (avoids floods)
+    # Coarse RL-penalized path (avoids floods)
     rl_path, rl_cost = rl_penalized_dijkstra(cost_grid, start, goal,
                                               flood_avoid_multiplier=6.0)
 
-    # Compute flood exposure along each path
-    def flood_on_path(path, flood_max):
-        if not path:
-            return 0.0
-        total = 0.0
-        for c, r in path:
-            rf = r * ROUTE_SCALE + ROUTE_SCALE // 2
-            cf = c * ROUTE_SCALE + ROUTE_SCALE // 2
-            rf = min(rf, GRID_ROWS - 1)
-            cf = min(cf, GRID_COLS - 1)
-            total += flood_max[rf, cf]
-        return round(total / max(len(path), 1), 2)
-
-    dijk_exposure = flood_on_path(dijk_path, flood_max)
-    rl_exposure   = flood_on_path(rl_path, flood_max)
+    # WGS84 paths (initially coarse grid paths)
+    dijk_wgs84 = path_to_wgs84(dijk_path)
+    rl_wgs84 = path_to_wgs84(rl_path)
 
     dijk_km = path_length_km(dijk_path)
-    rl_km   = path_length_km(rl_path)
+    rl_km = path_length_km(rl_path)
+
+    # Query street-level OSRM route if requested
+    if use_osrm:
+        # 1. Dijkstra road path
+        dijk_road, dijk_road_km = query_osrm_route([(origin_lon, origin_lat), (dest_lon, dest_lat)])
+        if dijk_road:
+            dijk_wgs84 = [(origin_lon, origin_lat)] + dijk_road + [(dest_lon, dest_lat)]
+            dijk_km = round(dijk_road_km, 2)
+        else:
+            dijk_wgs84 = [(origin_lon, origin_lat)] + dijk_wgs84 + [(dest_lon, dest_lat)]
+
+        # 2. RL road path
+        if dijk_path == rl_path:
+            rl_wgs84 = dijk_wgs84
+            rl_km = dijk_km
+        else:
+            # Detour needed! Use grid path to pick waypoints
+            waypoints = [(origin_lon, origin_lat)]
+            if len(rl_wgs84) > 2:
+                if len(rl_wgs84) > 12:
+                    idx1 = len(rl_wgs84) // 3
+                    idx2 = (2 * len(rl_wgs84)) // 3
+                    waypoints.append(rl_wgs84[idx1])
+                    waypoints.append(rl_wgs84[idx2])
+                else:
+                    idx = len(rl_wgs84) // 2
+                    waypoints.append(rl_wgs84[idx])
+            waypoints.append((dest_lon, dest_lat))
+
+            rl_road, rl_road_km = query_osrm_route(waypoints)
+            if rl_road:
+                rl_wgs84 = [(origin_lon, origin_lat)] + rl_road + [(dest_lon, dest_lat)]
+                rl_km = round(rl_road_km, 2)
+            else:
+                rl_wgs84 = [(origin_lon, origin_lat)] + rl_wgs84 + [(dest_lon, dest_lat)]
+    else:
+        # Pad with exact start/end points
+        dijk_wgs84 = [(origin_lon, origin_lat)] + dijk_wgs84 + [(dest_lon, dest_lat)]
+        rl_wgs84 = [(origin_lon, origin_lat)] + rl_wgs84 + [(dest_lon, dest_lat)]
+
+    # Compute flood exposure along WGS84 paths (average depth in cm)
+    def flood_on_wgs84_path(coords, flood_max):
+        if not coords:
+            return 0.0
+        total = 0.0
+        for lon, lat in coords:
+            col = int((lon - LON_MIN) / (LON_MAX - LON_MIN) * GRID_COLS)
+            row = int((1 - (lat - LAT_MIN) / (LAT_MAX - LAT_MIN)) * GRID_ROWS)
+            col = max(0, min(GRID_COLS - 1, col))
+            row = max(0, min(GRID_ROWS - 1, row))
+            total += flood_max[row, col]
+        return round(total / max(len(coords), 1), 2)
+
+    dijk_exposure = flood_on_wgs84_path(dijk_wgs84, flood_max)
+    rl_exposure = flood_on_wgs84_path(rl_wgs84, flood_max)
 
     return {
         'dijkstra': {
-            'path_wgs84':     path_to_wgs84(dijk_path),
+            'path_wgs84':     dijk_wgs84,
             'path_grid':      dijk_path,
             'distance_km':    dijk_km,
             'avg_flood_exposure_cm': dijk_exposure,
@@ -201,7 +272,7 @@ def compare_routes(typhoon_id: int,
             'color':          '#e74c3c',
         },
         'rl': {
-            'path_wgs84':     path_to_wgs84(rl_path),
+            'path_wgs84':     rl_wgs84,
             'path_grid':      rl_path,
             'distance_km':    rl_km,
             'avg_flood_exposure_cm': rl_exposure,
@@ -213,7 +284,7 @@ def compare_routes(typhoon_id: int,
             'flood_reduction_cm':   round(dijk_exposure - rl_exposure, 2),
             'flood_reduction_pct':  round(
                 (dijk_exposure - rl_exposure) / max(dijk_exposure, 1) * 100, 1
-            ),
+            ) if dijk_exposure > 0 else 0.0,
         },
         'flood_grid_shape':  (h, w),
         'origin_grid':       start,
@@ -237,7 +308,7 @@ def find_safe_shelters(lat: float, lon: float, typhoon_id: int,
         sh_depth = compute_flood_depth_at(sh['lat'], sh['lon'], flood_max)
         if sh_depth >= 100:  # skip blocked shelters
             continue
-        route = compare_routes(typhoon_id, lat, lon, sh['lat'], sh['lon'])
+        route = compare_routes(typhoon_id, lat, lon, sh['lat'], sh['lon'], use_osrm=False)
         rl_km = route['rl']['distance_km']
         rows.append({
             'name':         sh['name'],
