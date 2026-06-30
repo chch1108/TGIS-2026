@@ -266,6 +266,17 @@ def greedy_allocation(zones_df: pd.DataFrame, n_pumps: int = N_PUMPS,
         total_dist += haversine(*prev, row['lat'], row['lon'])
         prev = (row['lat'], row['lon'])
     total_dist += haversine(*prev, depot_lat, depot_lon)
+
+    # Query OSRM for actual road distance
+    try:
+        from evacuation_routing import query_osrm_route
+        greedy_coords = [(depot_lon, depot_lat)] + [(r['lon'], r['lat']) for _, r in top.iterrows()] + [(depot_lon, depot_lat)]
+        _, road_dist_km = query_osrm_route(greedy_coords)
+        if road_dist_km is not None:
+            total_dist = road_dist_km
+    except Exception:
+        pass
+
     risk_covered = top['priority_score'].sum()
     return {
         'plan': top,
@@ -312,6 +323,17 @@ def run_resource_allocation(typhoon_id: int,
     # Ordered route locations
     route_coords = [aco.locs[i] for i in best_tour]
     total_ga_dist = best_len
+
+    # Query OSRM for actual road route
+    try:
+        from evacuation_routing import query_osrm_route
+        osrm_coords = [(aco.locs[i][1], aco.locs[i][0]) for i in best_tour]
+        road_coords, road_dist_km = query_osrm_route(osrm_coords)
+        if road_coords:
+            route_coords = [(c[1], c[0]) for c in road_coords]
+            total_ga_dist = road_dist_km
+    except Exception:
+        pass
 
     # Comparison metrics
     ga_risk = ga_plan['priority_score'].sum()
