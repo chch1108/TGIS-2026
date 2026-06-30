@@ -567,6 +567,15 @@ def build_folium_map(typhoon_id: int,
     risk_df    = cached_facility_risk(typhoon_id)
     risk_lookup = {(r['name'], r['type']): r for _, r in risk_df.iterrows()}
 
+    # Get shelter utilization lookup
+    shelter_util_lookup = {}
+    try:
+        shelter_util = cached_shelter_util(typhoon_id)
+        for _, r in shelter_util.iterrows():
+            shelter_util_lookup[r['name']] = r['utilization_pct']
+    except Exception:
+        pass
+
     for ftype, enabled in show_facilities.items():
         if not enabled or ftype not in facilities:
             continue
@@ -583,12 +592,28 @@ def build_folium_map(typhoon_id: int,
             level  = r_info.get('risk_level', '未知')
             cap    = row.get('capacity', '')
             cap_str = f' | 容量:{int(cap)}人' if str(cap) not in ('', 'nan', '0') else ''
-            tip = f"{facility_label}｜{row['name']}｜淹水 {depth} cm｜{level}{cap_str}"
+            
+            current_color = icon_color
+            if ftype == 'shelters' and row['name'] in shelter_util_lookup:
+                util = shelter_util_lookup[row['name']]
+                if util < 60:
+                    current_color = 'green'
+                    status_label = '✅ 充裕'
+                elif util < 90:
+                    current_color = 'orange'
+                    status_label = '⚠️ 接近飽和'
+                else:
+                    current_color = 'red'
+                    status_label = '🚨 超載'
+                tip = f"{facility_label}｜{row['name']}｜使用率 {util:.1f}% ({status_label})｜淹水 {depth} cm｜{level}{cap_str}"
+            else:
+                tip = f"{facility_label}｜{row['name']}｜淹水 {depth} cm｜{level}{cap_str}"
+
             folium.Marker(
                 [row['lat'], row['lon']],
                 popup=tip,
                 tooltip=str(row['name'])[:30],
-                icon=folium.Icon(color=icon_color, icon=glyph_name)
+                icon=folium.Icon(color=current_color, icon=glyph_name)
             ).add_to(m)
 
     # ── Routes ──
@@ -875,12 +900,17 @@ def page_resource_allocation(typhoon_id, show_fac, show_heatmap, show_track,
     st.markdown(f'<div class="section-header">抽水機資源分配 · {event_title(typhoon_id, custom_typhoon)}</div>',
                 unsafe_allow_html=True)
 
+    with st.spinner("載入高風險區域..."):
+        zones = get_high_risk_zones(typhoon_id, top_k=25)
+    default_depot_lat = float(zones['lat'].mean())
+    default_depot_lon = float(zones['lon'].mean())
+
     with st.expander("分配參數設定", expanded=True):
         c1, c2, c3 = st.columns(3)
         n_pumps  = c1.slider("抽水機數量", 5, 20, 10)
         ga_gens  = c2.slider("GA 演化代數", 30, 200, 80)
-        depot_lat= c3.number_input("車庫緯度", value=23.71, format="%.4f")
-        depot_lon= c3.number_input("車庫經度", value=120.43, format="%.4f")
+        depot_lat= c3.number_input("車庫緯度", value=default_depot_lat, format="%.4f")
+        depot_lon= c3.number_input("車庫經度", value=default_depot_lon, format="%.4f")
 
     run_key = f"alloc_{typhoon_id}_{n_pumps}_{ga_gens}"
     if run_key not in st.session_state:
@@ -899,8 +929,6 @@ def page_resource_allocation(typhoon_id, show_fac, show_heatmap, show_track,
     result = st.session_state.get(run_key)
     if result is None:
         st.info("設定完成後，點擊上方按鈕執行資源分配演算法。")
-        with st.spinner("載入高風險區域..."):
-            zones = get_high_risk_zones(typhoon_id, top_k=25)
         st.markdown('<div class="section-header">高優先度淹水區域</div>', unsafe_allow_html=True)
         zone_display = zones[
             ['zone_id', 'lat', 'lon', 'flood_depth_cm', 'priority_score']

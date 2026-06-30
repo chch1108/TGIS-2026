@@ -89,14 +89,33 @@ class GeneticAllocator:
     def _fitness(self, chrom):
         unique_zones = list(set(chrom))
         risk_covered = sum(self.zones.loc[z, 'priority_score'] for z in unique_zones)
-        # Travel: depot → each unique zone (nearest-insertion approximation)
+
+        if not unique_zones:
+            return 0.0
+
+        # Sort unique zones using a simple nearest-neighbor heuristic starting from depot
+        unvisited = unique_zones[:]
+        tour = []
+        curr = self.depot
+        while unvisited:
+            nearest_z = min(
+                unvisited,
+                key=lambda z: haversine(
+                    curr[0], curr[1],
+                    self.zones.loc[z, 'lat'], self.zones.loc[z, 'lon']
+                )
+            )
+            tour.append(nearest_z)
+            curr = (self.zones.loc[nearest_z, 'lat'], self.zones.loc[nearest_z, 'lon'])
+            unvisited.remove(nearest_z)
+
         total_dist = 0.0
         prev = self.depot
-        for z in unique_zones:
+        for z in tour:
             loc = (self.zones.loc[z, 'lat'], self.zones.loc[z, 'lon'])
             total_dist += haversine(*prev, *loc)
             prev = loc
-        total_dist += haversine(*prev, *self.depot)
+        # Open path: no return to depot!
         return risk_covered / max(total_dist, 1.0)
 
     def _random_chrom(self):
@@ -226,7 +245,7 @@ class ACORouter:
                         break
             tour.append(nxt)
             visited[nxt] = True
-        tour.append(0)  # return to depot
+        # Open path: do not return to depot at the end of the tour!
         return tour
 
     def _tour_length(self, tour):
@@ -265,12 +284,13 @@ def greedy_allocation(zones_df: pd.DataFrame, n_pumps: int = N_PUMPS,
     for _, row in top.iterrows():
         total_dist += haversine(*prev, row['lat'], row['lon'])
         prev = (row['lat'], row['lon'])
-    total_dist += haversine(*prev, depot_lat, depot_lon)
+    # Open path: no return to depot!
 
     # Query OSRM for actual road distance
     try:
         from evacuation_routing import query_osrm_route
-        greedy_coords = [(depot_lon, depot_lat)] + [(r['lon'], r['lat']) for _, r in top.iterrows()] + [(depot_lon, depot_lat)]
+        # Open path: no return to depot in coordinates list
+        greedy_coords = [(depot_lon, depot_lat)] + [(r['lon'], r['lat']) for _, r in top.iterrows()]
         _, road_dist_km = query_osrm_route(greedy_coords)
         if road_dist_km is not None:
             total_dist = road_dist_km
@@ -289,8 +309,8 @@ def greedy_allocation(zones_df: pd.DataFrame, n_pumps: int = N_PUMPS,
 # ─── Main API ─────────────────────────────────────────────────────────────────
 def run_resource_allocation(typhoon_id: int,
                              n_pumps: int = N_PUMPS,
-                             depot_lat: float = 23.71,
-                             depot_lon: float = 120.43,
+                             depot_lat: float = None,
+                             depot_lon: float = None,
                              ga_generations: int = 80,
                              progress_cb=None) -> dict:
     """
@@ -299,6 +319,10 @@ def run_resource_allocation(typhoon_id: int,
     """
     # Step 1: Extract high-risk zones
     zones = get_high_risk_zones(typhoon_id, top_k=25)
+
+    if depot_lat is None or depot_lon is None:
+        depot_lat = float(zones['lat'].mean())
+        depot_lon = float(zones['lon'].mean())
 
     # Step 2: Greedy baseline
     greedy = greedy_allocation(zones, n_pumps, depot_lat, depot_lon)

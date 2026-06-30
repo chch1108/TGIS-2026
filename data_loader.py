@@ -198,6 +198,9 @@ def load_population_grid() -> np.ndarray:
     """Load 40×40 population grid. Returns float array, -9999 = nodata."""
     df = pd.read_csv(ROOT / "yunlin_population_40x40.csv", header=0)
     arr = df.values.astype(float)
+    # Scale positive values to match Yunlin County's real population of ~670,000 (approx 1/45.9 scaling factor)
+    mask = arr >= 0
+    arr[mask] = arr[mask] / 45.9
     return arr   # shape (40, 40); -9999 = outside Yunlin
 
 def population_at_point(lat: float, lon: float) -> float:
