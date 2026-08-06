@@ -1,7 +1,7 @@
 """
 evacuation_routing.py
-避難路徑規劃模組 — Evacuation Route Planning
-Dijkstra (baseline) + RL-informed flood-penalized routing
+避難路徑規劃模組
+提供基於 Dijkstra 演算法和強化學習避災懲罰機制路徑規劃服務
 """
 
 import numpy as np
@@ -16,21 +16,21 @@ from data_loader import (
     GRID_ROWS, GRID_COLS, wgs84_to_pixel
 )
 
-# ─── Routing Grid ─────────────────────────────────────────────────────────────
-ROUTE_SCALE = 20    # Downsample the 980×1379 flood grid by this factor for routing
-# Route grid size: ~49 × 69 cells, each ~800m
+# ─── 避難路網網格建置 ─────────────────────────────────────────────────────────────
+ROUTE_SCALE = 20    # 降採樣因子，將 980×1379 淹水網格壓縮以加速路徑規劃
+# 壓縮後路網大小約為 49 × 69 網格，每個網格邊長約為 800 公尺
 
 def build_cost_grid(flood_max: np.ndarray,
                     flood_penalty: float = 50.0,
                     block_threshold: float = 100.0) -> np.ndarray:
     """
-    Build a cost grid for pathfinding from the flood depth array.
-    - Normal traversal cost = 1.0 (per cell)
-    - Flooded cell cost = 1 + flood_penalty * (depth / 100)
-    - Deeply flooded (>= block_threshold) = impassable (np.inf)
-    Returns downsampled grid of shape (GRID_ROWS//ROUTE_SCALE, GRID_COLS//ROUTE_SCALE)
+    依據預測最大水深陣列建置路徑搜尋阻力成本矩陣
+    - 一般路段行駛成本 = 1.0
+    - 淹水路段行駛成本 = 1.0 + 淹水懲罰值 * (水深 / 100)
+    - 嚴重淹水路段（大於等於阻斷臨界值） = 標記為無法通行 (np.inf)
+    傳回降採樣後二維阻力成本陣列
     """
-    # Downsample: take max flood in each coarse cell
+    # 進行降採樣，取區塊內最大淹水深度作為代表值
     h = GRID_ROWS // ROUTE_SCALE
     w = GRID_COLS // ROUTE_SCALE
     flood_coarse = np.zeros((h, w))
@@ -48,13 +48,17 @@ def build_cost_grid(flood_max: np.ndarray,
 
 
 def wgs84_to_route_pixel(lon: float, lat: float):
-    """Convert WGS84 lon/lat → coarse route grid (col, row)."""
+    """
+    將 WGS84 座標轉換為降採樣後避難路網網格座標 (col，row)
+    """
     col_fine, row_fine = wgs84_to_pixel(lon, lat)
     return col_fine // ROUTE_SCALE, row_fine // ROUTE_SCALE
 
 
 def route_pixel_to_wgs84(col: int, row: int):
-    """Convert coarse route grid → WGS84 midpoint."""
+    """
+    將降採樣路網網格座標 (col，row) 轉換為對應網格中心點 WGS84 經緯度
+    """
     col_fine = col * ROUTE_SCALE + ROUTE_SCALE // 2
     row_fine = row * ROUTE_SCALE + ROUTE_SCALE // 2
     lon = LON_MIN + col_fine / GRID_COLS * (LON_MAX - LON_MIN)
@@ -62,13 +66,13 @@ def route_pixel_to_wgs84(col: int, row: int):
     return lon, lat
 
 
-# ─── Dijkstra Pathfinding ─────────────────────────────────────────────────────
+# ─── Dijkstra 尋路演算法 ─────────────────────────────────────────────────────
 def dijkstra(cost_grid: np.ndarray,
              start: tuple, goal: tuple) -> tuple:
     """
-    Dijkstra shortest path on a 2D cost grid.
-    start, goal: (col, row) in coarse route grid
-    Returns (path_coords [(col,row),...], total_cost)
+    在二維阻力成本矩陣上執行 Dijkstra 最短路徑搜尋
+    起點和終點格式為降採樣網格中行和列座標 (col，row)
+    傳回格式為：(路徑座標串列 [(col，row)，...]，總行駛成本)
     """
     h, w = cost_grid.shape
     dist = np.full((h, w), np.inf)
@@ -76,6 +80,7 @@ def dijkstra(cost_grid: np.ndarray,
     sc, sr = start
     gc, gr = goal
 
+    # 確保起終點皆在有效範圍內
     if not (0 <= sr < h and 0 <= sc < w and 0 <= gr < h and 0 <= gc < w):
         return [], np.inf
 
@@ -88,6 +93,7 @@ def dijkstra(cost_grid: np.ndarray,
             continue
         if (c, r) == (gc, gr):
             break
+        # 支援八個移動方向（水平、垂直和對角線）
         for dc, dr in [(-1,0),(1,0),(0,-1),(0,1),(-1,-1),(-1,1),(1,-1),(1,1)]:
             nc, nr = c + dc, r + dr
             if 0 <= nr < h and 0 <= nc < w:
@@ -98,7 +104,7 @@ def dijkstra(cost_grid: np.ndarray,
                     prev[(nc, nr)] = (c, r)
                     heapq.heappush(heap, (nd, nc, nr))
 
-    # Reconstruct path
+    # 重建路徑軌跡
     path = []
     cur = (gc, gr)
     while cur in prev:
@@ -111,7 +117,10 @@ def dijkstra(cost_grid: np.ndarray,
 
 
 def path_length_km(path: list) -> float:
-    """Estimate path length in km from coarse grid cells."""
+    """
+    估算網格路徑地理實際長度（公里）
+    每個降採樣網格邊長約為 0.8 公里
+    """
     cell_km = (CELLSIZE_KM := ROUTE_SCALE * 40 / 1000)
     if len(path) < 2:
         return 0.0
@@ -124,17 +133,19 @@ def path_length_km(path: list) -> float:
 
 
 def path_to_wgs84(path: list) -> list:
-    """Convert list of (col, row) grid coords to list of (lon, lat) WGS84."""
+    """
+    將網格座標路徑串列轉換為 WGS84 經緯度座標串列
+    """
     return [route_pixel_to_wgs84(c, r) for c, r in path]
 
 
-# ─── RL-Informed Penalty Routing ─────────────────────────────────────────────
+# ─── 類強化學習避災路徑規劃 ─────────────────────────────────────────────
 def rl_penalized_dijkstra(cost_grid: np.ndarray,
                            start: tuple, goal: tuple,
                            flood_avoid_multiplier: float = 5.0) -> tuple:
     """
-    RL-style routing with amplified flood avoidance.
-    Higher multiplier = stronger tendency to detour around floods.
+    模擬強化學習避災策略尋路邏輯
+    對有積水路段行駛成本加倍放大以實現強烈避開積水區域效果
     """
     h, w = cost_grid.shape
     rl_cost = np.where(cost_grid > 1.0,
@@ -146,9 +157,9 @@ def rl_penalized_dijkstra(cost_grid: np.ndarray,
 
 def query_osrm_route(coords: list) -> tuple:
     """
-    Query street-aligned route from OSRM public API.
-    coords: list of (lon, lat) tuples
-    Returns (list of (lon, lat) tuples, distance_km) or (None, None) on failure.
+    串接 OSRM 公開路網 API 取得車輛行駛道路軌跡
+    參數 coords 為 (lon，lat) 組成座標串列
+    傳回道路座標軌跡和行駛里程數，若連線失敗則傳回 (None，None)
     """
     coord_str = ";".join(f"{lon},{lat}" for lon, lat in coords)
     url = f"http://router.project-osrm.org/route/v1/driving/{coord_str}?overview=full&geometries=geojson"
@@ -169,7 +180,7 @@ def query_osrm_route(coords: list) -> tuple:
     return None, None
 
 
-# ─── Route Comparison API ─────────────────────────────────────────────────────
+# ─── 避災路徑比較評估 ─────────────────────────────────────────────────────
 def compare_routes(typhoon_id: int,
                    origin_lat: float, origin_lon: float,
                    dest_lat: float, dest_lon: float,
@@ -177,8 +188,8 @@ def compare_routes(typhoon_id: int,
                    block_threshold: float = 100.0,
                    use_osrm: bool = True) -> dict:
     """
-    Compare Dijkstra (shortest path) vs RL-informed (flood-avoiding) route.
-    Returns dict with both paths and comparison metrics.
+    比較傳統 Dijkstra（幾何最短路徑）和本系統所提類強化學習避災路徑
+    傳回雙方路徑空間軌跡、總長度及淹水暴露風險對比數據
     """
     flood_max = load_typhoon_max(typhoon_id)
     cost_grid = build_cost_grid(flood_max, flood_penalty, block_threshold)
@@ -186,30 +197,30 @@ def compare_routes(typhoon_id: int,
     start = wgs84_to_route_pixel(origin_lon, origin_lat)
     goal  = wgs84_to_route_pixel(dest_lon, dest_lat)
 
-    # Clamp to grid
+    # 確保起終點範圍邊界限制
     h, w = cost_grid.shape
     start = (max(0, min(w-1, start[0])), max(0, min(h-1, start[1])))
     goal  = (max(0, min(w-1, goal[0])),  max(0, min(h-1, goal[1])))
 
-    # Coarse Dijkstra path (ignores flood)
+    # 1. 傳統幾何最短路網計算（忽視積水阻抗）
     dijkstra_cost_grid = np.ones_like(cost_grid)
     dijkstra_cost_grid[cost_grid == np.inf] = np.inf
     dijk_path, dijk_cost = dijkstra(dijkstra_cost_grid, start, goal)
 
-    # Coarse RL-penalized path (avoids floods)
+    # 2. 類強化學習避災路網計算（自動繞避積水區域）
     rl_path, rl_cost = rl_penalized_dijkstra(cost_grid, start, goal,
                                               flood_avoid_multiplier=6.0)
 
-    # WGS84 paths (initially coarse grid paths)
+    # 轉換為經緯度軌跡
     dijk_wgs84 = path_to_wgs84(dijk_path)
     rl_wgs84 = path_to_wgs84(rl_path)
 
     dijk_km = path_length_km(dijk_path)
     rl_km = path_length_km(rl_path)
 
-    # Query street-level OSRM route if requested
+    # 若啟用了 OSRM 地圖路由映射
     if use_osrm:
-        # 1. Dijkstra road path
+        # 計算 Dijkstra 實際路網軌跡
         dijk_road, dijk_road_km = query_osrm_route([(origin_lon, origin_lat), (dest_lon, dest_lat)])
         if dijk_road:
             dijk_wgs84 = [(origin_lon, origin_lat)] + dijk_road + [(dest_lon, dest_lat)]
@@ -217,12 +228,12 @@ def compare_routes(typhoon_id: int,
         else:
             dijk_wgs84 = [(origin_lon, origin_lat)] + dijk_wgs84 + [(dest_lon, dest_lat)]
 
-        # 2. RL road path
+        # 計算 RL 避災路網軌跡
         if dijk_path == rl_path:
             rl_wgs84 = dijk_wgs84
             rl_km = dijk_km
         else:
-            # Detour needed! Use grid path to pick waypoints
+            # 依據網格避災路徑選取導航控制點
             waypoints = [(origin_lon, origin_lat)]
             if len(rl_wgs84) > 2:
                 if len(rl_wgs84) > 12:
@@ -242,11 +253,11 @@ def compare_routes(typhoon_id: int,
             else:
                 rl_wgs84 = [(origin_lon, origin_lat)] + rl_wgs84 + [(dest_lon, dest_lat)]
     else:
-        # Pad with exact start/end points
+        # 直接補上起點及終點
         dijk_wgs84 = [(origin_lon, origin_lat)] + dijk_wgs84 + [(dest_lon, dest_lat)]
         rl_wgs84 = [(origin_lon, origin_lat)] + rl_wgs84 + [(dest_lon, dest_lat)]
 
-    # Compute flood exposure along WGS84 paths (average depth in cm)
+    # 計算車輛行經路段平均積水水深暴露值（公分）
     def flood_on_wgs84_path(coords, flood_max):
         if not coords:
             return 0.0
@@ -292,12 +303,12 @@ def compare_routes(typhoon_id: int,
     }
 
 
-# ─── Nearest Available Shelter ────────────────────────────────────────────────
+# ─── 鄰近安全避難所檢索功能 ────────────────────────────────────────────────
 def find_safe_shelters(lat: float, lon: float, typhoon_id: int,
                         max_results: int = 5) -> pd.DataFrame:
     """
-    Find nearest shelters that are not severely flooded.
-    Returns top shelters sorted by RL-penalized travel distance.
+    為受災居民檢索最鄰近且無淹水威脅（水深小於 100 公分）避難收容所
+    傳回名單會依據實際避災行駛里程數進行升冪排序
     """
     from data_loader import load_shelters, compute_flood_depth_at
     flood_max = load_typhoon_max(typhoon_id)
@@ -306,7 +317,7 @@ def find_safe_shelters(lat: float, lon: float, typhoon_id: int,
     rows = []
     for _, sh in shelters.iterrows():
         sh_depth = compute_flood_depth_at(sh['lat'], sh['lon'], flood_max)
-        if sh_depth >= 100:  # skip blocked shelters
+        if sh_depth >= 100:  # 排除已經受淹水威脅而無法運作收容所
             continue
         route = compare_routes(typhoon_id, lat, lon, sh['lat'], sh['lon'], use_osrm=False)
         rl_km = route['rl']['distance_km']

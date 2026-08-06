@@ -353,7 +353,7 @@ def geocode_address(address: str) -> dict | None:
     if "雲林" not in query:
         query = f"雲林縣 {query}"
 
-    # Public Nominatim requests must be identifiable and kept below 1 request/s.
+    # 公開 Nominatim 請求必須可供辨識且頻率需保持在每秒 1 次以下
     time.sleep(1.05)
     response = requests.get(
         "https://nominatim.openstreetmap.org/search",
@@ -429,7 +429,7 @@ def custom_typhoon_dialog():
         if default_reference in reference_ids else reference_ids.index(5)
     )
 
-    st.caption("自訂氣象資訊會搭配一組既有淹水情境，供地圖、設施與路徑分析使用。")
+    st.caption("自訂氣象資訊會搭配一組既有淹水情境，供地圖、設施和路徑分析使用。")
     with st.form("custom_typhoon_form"):
         c1, c2 = st.columns(2)
         name = c1.text_input("颱風名稱", value=current.get("name", "自訂颱風"))
@@ -536,7 +536,7 @@ def build_folium_map(typhoon_id: int,
     # ── Flood heatmap ──
     if show_heatmap:
         flood_max = cached_flood_max(typhoon_id)
-        step = 8   # sample every 8th cell for speed
+        step = 8   # 每隔 8 個網格抽樣一次以提升運算速度
         ys, xs = np.where(flood_max[::step, ::step] > 0)
         depths = flood_max[::step, ::step][ys, xs]
         lats_h = LAT_MAX - ys * step / (flood_max.shape[0]) * (LAT_MAX - LAT_MIN)
@@ -567,7 +567,7 @@ def build_folium_map(typhoon_id: int,
     risk_df    = cached_facility_risk(typhoon_id)
     risk_lookup = {(r['name'], r['type']): r for _, r in risk_df.iterrows()}
 
-    # Get shelter utilization lookup
+    # 取得收容所使用率對照表
     shelter_util_lookup = {}
     try:
         shelter_util = cached_shelter_util(typhoon_id)
@@ -582,7 +582,7 @@ def build_folium_map(typhoon_id: int,
         icon_color, icon_name, facility_label = FACILITY_ICONS.get(
             ftype, ('blue', 'info', '設施')
         )
-        # glyphicon icon names (no fa prefix needed)
+        # glyphicon 圖標名稱（無需 fa 前綴）
         glyph_map = {'plus':'plus-sign','home':'home','bolt':'flash','map-marker':'map-marker'}
         glyph_name = glyph_map.get(icon_name, 'info-sign')
         for _, row in facilities[ftype].iterrows():
@@ -598,13 +598,13 @@ def build_folium_map(typhoon_id: int,
                 util = shelter_util_lookup[row['name']]
                 if util < 60:
                     current_color = 'green'
-                    status_label = '✅ 充裕'
+                    status_label = '🟢 充裕'
                 elif util < 90:
                     current_color = 'orange'
                     status_label = '⚠️ 接近飽和'
                 else:
                     current_color = 'red'
-                    status_label = '🚨 超載'
+                    status_label = '❌ 超載'
                 tip = f"{facility_label}｜{row['name']}｜使用率 {util:.1f}% ({status_label})｜淹水 {depth} cm｜{level}{cap_str}"
             else:
                 tip = f"{facility_label}｜{row['name']}｜淹水 {depth} cm｜{level}{cap_str}"
@@ -628,13 +628,13 @@ def build_folium_map(typhoon_id: int,
                     weight=4, opacity=0.85,
                     tooltip=rd.get('label', route_type)
                 ).add_to(m)
-        # Origin / destination markers
+        # 起點和終點標記
         if 'origin' in route_data:
             folium.Marker(route_data['origin'], tooltip='起點',
                           icon=folium.Icon(color='blue', icon='home')
                           ).add_to(m)
         if 'destination' in route_data:
-            folium.Marker(route_data['destination'], tooltip='目的地',
+            folium.Marker(route_data['destination'], tooltip='終點',
                           icon=folium.Icon(color='green', icon='flag')
                           ).add_to(m)
     return m
@@ -714,7 +714,7 @@ def page_flood_overview(typhoon_id, show_fac, show_heatmap, show_track,
     pop  = cached_pop_exposure(typhoon_id)
     stats= cached_flood_stats(typhoon_id)
 
-    # Hero
+    # 看板標題
     risk_colors = {'低風險':'#27ae60','中風險':'#f1c40f','高風險':'#e74c3c','極高風險':'#8e44ad'}
     rc = risk_colors.get(risk['risk_label'], '#6e8199')
     event_badge = (
@@ -741,7 +741,7 @@ def page_flood_overview(typhoon_id, show_fac, show_heatmap, show_track,
          10級暴風半徑：{row['radius_10_km']} km</p>
     </div>""", unsafe_allow_html=True)
 
-    # Overview KPI row
+    # 綜合指標 KPI 列
     k1, k2, k3, k4, k5 = st.columns(5)
     kpis = [
         (k1, f"{stats['total_flooded_area_km2']}", "km²", "淹水面積"),
@@ -811,7 +811,7 @@ def page_flood_overview(typhoon_id, show_fac, show_heatmap, show_track,
         )
         st.plotly_chart(fig2, use_container_width=True)
 
-    # Animation
+    # 動態模擬呈現
     st.markdown('<div class="section-header">淹水動態演進</div>', unsafe_allow_html=True)
     gif_path = load_typhoon_animation_gif(typhoon_id)
     with open(gif_path, "rb") as gif_file:
@@ -841,7 +841,7 @@ def page_facility_risk(typhoon_id, show_fac, show_heatmap, show_track,
 
     risk_df = cached_facility_risk(typhoon_id)
 
-    # Summary counts
+    # 摘要數量統計
     c1, c2, c3, c4 = st.columns(4)
     for col, ftype, label in [
         (c1, 'hospitals', '醫院'),
@@ -877,7 +877,7 @@ def page_facility_risk(typhoon_id, show_fac, show_heatmap, show_track,
         display_df.columns = ['類型','名稱','淹水深度(cm)','風險等級','風險分數']
         st.dataframe(display_df, use_container_width=True, height=400)
 
-    # Risk score distribution
+    # 風險評分分佈圖
     st.markdown('<div class="section-header">各類型設施風險分數分佈</div>', unsafe_allow_html=True)
     type_labels = {'hospitals':'醫院','care_centers':'長照中心','substations':'變電所','shelters':'收容所'}
     fig = go.Figure()
@@ -957,7 +957,7 @@ def page_resource_allocation(typhoon_id, show_fac, show_heatmap, show_track,
     col_l, col_r = st.columns([3, 2])
 
     with col_l:
-        # GA convergence
+        # 遺傳演算法 (GA) 收斂曲線
         st.markdown('<div class="section-header">GA 收斂曲線</div>', unsafe_allow_html=True)
         fig = go.Figure(go.Scatter(y=result['ga_history'], mode='lines',
                                     line=dict(color='#1d8cf8', width=2)))
@@ -971,7 +971,7 @@ def page_resource_allocation(typhoon_id, show_fac, show_heatmap, show_track,
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        # Deployment map
+        # 部署點位地圖呈現
         st.markdown('<div class="section-header">部署地圖</div>', unsafe_allow_html=True)
         m = build_folium_map(typhoon_id, show_fac, show_heatmap, show_track=False)
         depot = result['depot']
@@ -1040,12 +1040,12 @@ def page_evacuation_routing(typhoon_id, show_fac, show_heatmap, show_track,
             placeholder="例如：雲林縣斗六市雲林路二段515號",
             label_visibility="collapsed",
         )
-    st.caption("可輸入雲林縣內的完整地址、車站、學校或政府機關名稱。")
+    st.caption("可輸入雲林縣內完整地址、車站、學校或政府機關名稱。")
 
     if st.button("計算建議路徑", type="primary"):
         st.session_state['route_result'] = None
         if not origin_address.strip() or not destination_address.strip():
-            st.error("請完整輸入起點與終點。")
+            st.error("請完整輸入起點和終點。")
         else:
             try:
                 with st.spinner("正在辨識地址..."):
@@ -1060,7 +1060,7 @@ def page_evacuation_routing(typhoon_id, show_fac, show_heatmap, show_track,
                 if destination_match is None:
                     missing.append("終點")
                 if missing:
-                    st.error(f"無法辨識{'、'.join(missing)}，請輸入更完整的雲林地址或知名地標。")
+                    st.error(f"無法辨識{'、'.join(missing)}，請輸入完整雲林地址或知名地標。")
                 else:
                     o_lat, o_lon = origin_match["lat"], origin_match["lon"]
                     d_lat, d_lon = destination_match["lat"], destination_match["lon"]
@@ -1074,7 +1074,7 @@ def page_evacuation_routing(typhoon_id, show_fac, show_heatmap, show_track,
 
     result = st.session_state.get('route_result')
     if result is None:
-        st.info("輸入起點與終點地址後，點擊「計算建議路徑」。")
+        st.info("輸入起點和終點地址後，點擊「計算建議路徑」。")
         return
 
     origin_match = st.session_state.get('route_origin_match')

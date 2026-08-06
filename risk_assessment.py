@@ -1,7 +1,7 @@
 """
 risk_assessment.py
-風險評估模組 — Risk Assessment Module
-計算人口暴露量、設施風險評分、收容所容量管理
+風險評估模組
+計算人口暴露量、設施風險評量和收容所容量管理
 """
 
 import numpy as np
@@ -14,27 +14,27 @@ from data_loader import (
 )
 
 
-# ─── Population Exposure ──────────────────────────────────────────────────────
+# ─── 人口暴露量評估 ──────────────────────────────────────────────────────
 def compute_population_exposure(typhoon_id: int, threshold_cm: float = 30.0) -> dict:
     """
-    Estimate population exposed to flooding above a threshold.
-    Returns dict with exposure stats.
+    估算受特定水深臨界值（公分）淹水威脅暴露人口數量
+    傳回包含各淹水程度暴露人口及比率字典
     """
     flood_max = load_typhoon_max(typhoon_id)
     pop_grid  = load_population_grid().astype(float)
     pop_grid[pop_grid < 0] = 0.0
 
-    # Resize population grid (40×40) to flood grid (980×1379) via zoom
+    # 使用線性插值將 40×40 人口網格放大映射至 980×1379 淹水網格
     zoom_r = GRID_ROWS / pop_grid.shape[0]
     zoom_c = GRID_COLS / pop_grid.shape[1]
     pop_resized = zoom(pop_grid, (zoom_r, zoom_c), order=1)
-    # Each flood cell's population = pop_per_km2 * (40m*40m / 1e6 km2)
+    # 計算每個網格像素實際居住人口：人口密度 * 網格面積（平方公里）
     cell_area_km2 = (40.0 ** 2) / 1e6
     pop_per_cell = pop_resized * cell_area_km2
 
     total_pop = float(pop_per_cell.sum())
 
-    # Masks by severity
+    # 依據淹水水深進行災害程度分類遮罩
     mild_mask   = (flood_max > 0)   & (flood_max < 30)
     mod_mask    = (flood_max >= 30)  & (flood_max < 70)
     severe_mask = (flood_max >= 70)  & (flood_max < 100)
@@ -53,18 +53,18 @@ def compute_population_exposure(typhoon_id: int, threshold_cm: float = 30.0) -> 
     }
 
 
-# ─── Facility Risk Scoring ────────────────────────────────────────────────────
+# ─── 關鍵基礎設施風險評分 ────────────────────────────────────────────────────
 FACILITY_WEIGHTS = {
-    'hospitals':    5,   # Highest criticality
-    'care_centers': 4,
-    'substations':  3,
-    'shelters':     2,
+    'hospitals':    5,   # 醫院（最高關鍵權重）
+    'care_centers': 4,   # 長照機構
+    'substations':  3,   # 變電所
+    'shelters':     2,   # 避難收容所
 }
 
 def score_facility_risk(depth_cm: float, weight: int) -> float:
     """
-    Compute a 0-100 risk score for a facility.
-    Depth thresholds (cm): 0→0, 30→30, 70→60, 100→80, 150→100
+    計算設施綜合風險評分（0 至 100 分範圍內）
+    水深阻抗區間對照：0公分->0分，30公分->30分，70公分->60分，100公分->80分，150公分以上->100分
     """
     if depth_cm <= 0:
         depth_score = 0.0
@@ -80,8 +80,7 @@ def score_facility_risk(depth_cm: float, weight: int) -> float:
 
 def full_facility_risk_report(typhoon_id: int) -> pd.DataFrame:
     """
-    Generate a complete risk report for all facilities.
-    Returns DataFrame sorted by risk score descending.
+    產出特定颱風事件下全縣所有關鍵設施風險評估報表並按分數降冪排序
     """
     facilities = load_all_facilities()
     df = assess_facility_risks(typhoon_id, facilities)
@@ -102,21 +101,21 @@ def full_facility_risk_report(typhoon_id: int) -> pd.DataFrame:
         'hospitals':    '🏥 醫院',
         'care_centers': '🏠 長照中心',
         'substations':  '⚡ 變電所',
-        'shelters':     '🏕️ 收容所',
+        'shelters':     '🤍 收容所',
     }
     df['type_label'] = df['type'].map(type_labels)
     return df
 
 
-# ─── Shelter Capacity Management ─────────────────────────────────────────────
+# ─── 避難收容所容量管理和調度 ─────────────────────────────────────────────
 def compute_shelter_utilization(
     typhoon_id: int,
     evacuation_factor: float = 0.05
 ) -> pd.DataFrame:
     """
-    Simulate shelter utilization based on nearby population exposure.
-    evacuation_factor: fraction of exposed population that evacuates.
-    Returns shelters with assigned_pop and utilization_pct.
+    藉由空間鄰近分析（KD樹）模擬計算受淹水威脅人口前去最近避難所人流分配情形
+    參數 evacuation_factor 為受災人口中前往收容所估算比率（預設為 5%）
+    傳回包含收容容量、估算避難人數及容量使用率收容所資料表
     """
     from data_loader import load_shelters, wgs84_to_pixel
     from scipy.spatial import cKDTree
@@ -128,26 +127,25 @@ def compute_shelter_utilization(
     shelters = load_shelters().reset_index(drop=True)
     shelters = shelters[shelters['capacity'] > 0].reset_index(drop=True)
 
-    # Build shelter KD-tree for nearest-neighbor assignment
+    # 建置收容所空間 KD樹 以供快速檢索最鄰近站點
     shelter_coords = shelters[['lat', 'lon']].values
     tree = cKDTree(shelter_coords)
 
-    # Sample flooded population cells and assign to nearest shelter
+    # 將人口密度格網降採樣放大以與淹水網格尺寸一致
     zoom_r = GRID_ROWS / pop_grid.shape[0]
     zoom_c = GRID_COLS / pop_grid.shape[1]
     pop_resized = zoom(pop_grid, (zoom_r, zoom_c), order=1)
     cell_area_km2 = (40.0 ** 2) / 1e6
     pop_per_cell = pop_resized * cell_area_km2
 
-    # Get flooded cells
-    flooded_mask = flood_max >= 30  # moderate+ flooding triggers evacuation
+    # 僅統計中度淹水（30 公分以上）區域人流疏散需求
+    flooded_mask = flood_max >= 30
     fy_idxs, fx_idxs = np.where(flooded_mask)
 
     assigned = np.zeros(len(shelters), dtype=float)
 
-    # Convert pixel coords to lat/lon for KD-tree query
     if len(fy_idxs) > 0:
-        # Sample at most 50k cells for speed
+        # 限制取樣數上限以防止網格計算過慢（最多 50000 個像素點）
         if len(fy_idxs) > 50000:
             idx = np.random.choice(len(fy_idxs), 50000, replace=False)
             fy_idxs, fx_idxs = fy_idxs[idx], fx_idxs[idx]
@@ -167,16 +165,16 @@ def compute_shelter_utilization(
         shelters['estimated_arrivals'] / shelters['capacity'].replace(0, np.nan) * 100
     ).fillna(0).round(1)
     shelters['status'] = shelters['utilization_pct'].apply(
-        lambda u: '✅ 充裕' if u < 60 else ('⚠️ 接近飽和' if u < 90 else '🚨 超載')
+        lambda u: '🟢 充裕' if u < 60 else ('🟠 接近飽和' if u < 90 else '🔴 超載')
     )
     return shelters.sort_values('utilization_pct', ascending=False)
 
 
-# ─── Aggregate County Risk Index ─────────────────────────────────────────────
+# ─── 縣市層級綜合風險指標計算 ─────────────────────────────────────────────
 def compute_county_risk_index(typhoon_id: int) -> dict:
     """
-    Compute a 0-100 composite risk index for the county under a typhoon.
-    Components: flood area, population exposure, critical facility exposure
+    估算全縣在特定颱風事件下綜合風險指標（0 至 100 分範圍內）
+    綜合考量：淹水面積、淹水深度、人口暴露比例及風速強度
     """
     from data_loader import compute_flood_statistics, load_typhoon_info
 
@@ -185,14 +183,14 @@ def compute_county_risk_index(typhoon_id: int) -> dict:
     info   = load_typhoon_info()
     typh   = info[info['id'] == typhoon_id].iloc[0]
 
-    # Flood severity (0-40): based on area + max depth
+    # 1. 淹水範圍和水深指標（佔 60% 分數）
     area_score  = min(40, stats['total_flooded_area_km2'] / 5)
     depth_score = min(20, stats['max_depth_cm'] / 5)
 
-    # Population exposure (0-30)
+    # 2. 人口暴露比例指標（佔 30% 分數）
     pop_score = min(30, pop_ex['exposure_rate_pct'])
 
-    # Wind speed proxy (0-10)
+    # 3. 風速指標（佔 10% 分數）
     wind_score = min(10, typh['wind_speed_ms'] / 6)
 
     total = area_score + depth_score + pop_score + wind_score
